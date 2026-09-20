@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deliverable Report</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1e293b; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f8fafc; }
+  article { background: #ffffff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
+  h1, h2, h3 { color: #0f172a; margin-top: 1.5em; margin-bottom: 0.5em; }
+  h1 { font-size: 2.2rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.3em; }
+  table { border-collapse: collapse; width: 100%; margin: 1.5em 0; }
+  th, td { border: 1px solid #cbd5e1; padding: 10px 14px; text-align: left; }
+  th { background: #f1f5f9; font-weight: 600; }
+  code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+  pre code { display: block; padding: 16px; overflow-x: auto; }
+  blockquote { border-left: 4px solid #3b82f6; margin: 1.5em 0; padding: 0.5em 1em; color: #475569; background: #eff6ff; }
+</style>
+</head>
+<body>
+  <article>
+    <h1>Task 3 Automation Workflow: Slack-to-Salesforce Lead Intake Automation</h1>
+<h2>1. Workflow Architecture Overview</h2>
+<h3>Business Outcome Alignment</h3>
+<p>This automation directly addresses the business need to reduce manual data entry effort by sales teams, improve CRM data accuracy, and accelerate lead response times. The workflow eliminates 2-3 minutes of manual work per lead while ensuring 100% data consistency between communication channels and CRM records.</p>
+<h3>System Components &amp; Flow Logic</h3>
+<pre><code>┌─────────────────┐     ┌─────────────────┐     ┌─────────────────────┐     ┌─────────────────┐
+│   Slack Workspace │────▶│   Middleware Layer │────▶│   Salesforce Instance │────▶│   Monitoring &amp;   │
+│   (Trigger Source)│     │   (Orchestration)  │     │   (CRM Destination)   │     │   Alerting System │
+└─────────────────┘     └─────────────────┘     └─────────────────────┘     └─────────────────┘
+         │                         │                         │                         │
+         │ 1. Message Posted      │ 2. Validate &amp; Enrich    │ 3. Create/Update Lead   │ 4. Log &amp; Monitor
+         │    in #sales-leads      │    Lead Data            │    Record               │    Success/Failure
+         ▼                         ▼                         ▼                         ▼
+</code></pre>
+<p><strong>Architectural Decisions:</strong>
+- <strong>Middleware Approach</strong>: A dedicated orchestration layer (not direct Slack→Salesforce integration) provides resilience, data transformation, and audit capabilities
+- <strong>Event-Driven Design</strong>: Asynchronous processing prevents blocking Slack users during Salesforce operations
+- <strong>Idempotent Operations</strong>: Each lead processed exactly once, even with retries
+- <strong>Decoupled Components</strong>: Each system interacts only with the middleware, simplifying maintenance</p>
+<h3>Technology Stack</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Technology Choice</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Trigger Detection</td>
+<td>Slack Events API (message.posted)</td>
+<td>Real-time, scalable, official API</td>
+</tr>
+<tr>
+<td>Middleware Runtime</td>
+<td>AWS Lambda (Python 3.12)</td>
+<td>Serverless, cost-effective, auto-scaling</td>
+</tr>
+<tr>
+<td>Data Transformation</td>
+<td>Custom Python service</td>
+<td>Full control over mapping logic</td>
+</tr>
+<tr>
+<td>Queue/Retry Mechanism</td>
+<td>Amazon SQS with DLQ</td>
+<td>Guaranteed delivery, retry management</td>
+</tr>
+<tr>
+<td>Monitoring</td>
+<td>Datadog + CloudWatch</td>
+<td>Comprehensive observability</td>
+</tr>
+<tr>
+<td>Secrets Management</td>
+<td>AWS Secrets Manager</td>
+<td>Secure credential storage</td>
+</tr>
+<tr>
+<td>Audit Trail</td>
+<td>Amazon DynamoDB</td>
+<td>Immutable transaction logging</td>
+</tr>
+</tbody>
+</table>
+<h2>2. Trigger Definition</h2>
+<h3>Primary Trigger Event</h3>
+<p><strong>Slack Event</strong>: <code>message.posted</code> in channel <code>#sales-leads</code> with specific metadata criteria.</p>
+<p><strong>Trigger Conditions (ALL must be true):</strong>
+1. <strong>Channel</strong>: Message posted in <code>#sales-leads</code> (channel ID: <code>C1234567890</code>)
+2. <strong>Message Pattern</strong>: Contains keyword "lead:" or "prospect:" in first 50 characters
+3. <strong>User Role</strong>: Posted by users in <code>sales-team</code> or <code>account-executive</code> user groups
+4. <strong>Message Type</strong>: Must be a user message (not bot message, file upload, or thread reply)
+5. <strong>Time Window</strong>: Business hours only (8 AM - 6 PM local time, Monday-Friday)</p>
+<p><strong>Trigger Payload Example:</strong></p>
+<pre><code class="language-json">{
+  &quot;token&quot;: &quot;verification_token&quot;,
+  &quot;team_id&quot;: &quot;T1234567890&quot;,
+  &quot;api_app_id&quot;: &quot;A1234567890&quot;,
+  &quot;event&quot;: {
+    &quot;type&quot;: &quot;message&quot;,
+    &quot;channel&quot;: &quot;C1234567890&quot;,
+    &quot;user&quot;: &quot;U1234567890&quot;,
+    &quot;text&quot;: &quot;lead: Acme Corp - John Doe - john@acme.com - Interested in Enterprise Plan&quot;,
+    &quot;ts&quot;: &quot;1625097600.123456&quot;,
+    &quot;thread_ts&quot;: null,
+    &quot;channel_type&quot;: &quot;channel&quot;
+  },
+  &quot;type&quot;: &quot;event_callback&quot;,
+  &quot;event_id&quot;: &quot;Ev1234567890&quot;,
+  &quot;event_time&quot;: 1625097600
+}
+</code></pre>
+<h3>Secondary Triggers (Fallback Mechanisms)</h3>
+<ol>
+<li><strong>Scheduled Polling</strong>: Hourly check for missed messages (cron: <code>0 * * * *</code>)</li>
+<li><strong>Manual Override</strong>: REST API endpoint for manual lead submission</li>
+<li><strong>Email Bridge</strong>: Forwarded emails to Slack channel also processed</li>
+</ol>
+<h2>3. API Integration Details</h2>
+<h3>Data Flow Sequence</h3>
+<p><strong>Step 1: Slack Event Reception</strong>
+- Slack Events API → AWS API Gateway endpoint
+- Verification of Slack signing secret
+- Immediate 200 OK response to Slack (within 3 seconds)
+- Event payload enqueued to SQS for async processing</p>
+<p><strong>Step 2: Message Parsing &amp; Validation</strong>
+- Lambda function processes SQS message
+- Extracts lead information using regex patterns
+- Validates required fields (company, contact, email)
+- Enriches data with:
+  - Lead source: "Slack Channel #sales-leads"
+  - Assigned sales rep (based on Slack user mapping)
+  - Geographic data (from email domain/IP lookup)</p>
+<p><strong>Step 3: Salesforce Integration</strong>
+- OAuth 2.0 JWT Bearer Flow for authentication
+- Salesforce REST API (v55.0) for lead operations
+- Bulk API for high-volume periods (&gt;10 leads/hour)</p>
+<h3>Field Mapping Specification</h3>
+<table>
+<thead>
+<tr>
+<th>Slack Message Component</th>
+<th>Salesforce Field</th>
+<th>Transformation Logic</th>
+<th>Validation Rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Company name (after "lead:")</td>
+<td><code>Company</code></td>
+<td>Extract first 80 chars</td>
+<td>Required, max 80 chars</td>
+</tr>
+<tr>
+<td>Contact person</td>
+<td><code>FirstName</code> + <code>LastName</code></td>
+<td>Split by space, first word = FirstName, rest = LastName</td>
+<td>Required, min 2 chars</td>
+</tr>
+<tr>
+<td>Email address</td>
+<td><code>Email</code></td>
+<td>Extract via regex <code>[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}</code></td>
+<td>RFC 5322 compliant</td>
+</tr>
+<tr>
+<td>Message content</td>
+<td><code>Description</code></td>
+<td>Full message text minus parsed components</td>
+<td>Max 32,000 chars</td>
+</tr>
+<tr>
+<td>Slack timestamp</td>
+<td><code>LeadSource</code> + custom field</td>
+<td><code>LeadSource = "Slack"</code>, <code>Slack_Message_TS__c</code> = timestamp</td>
+<td>ISO 8601 format</td>
+</tr>
+<tr>
+<td>Slack user ID</td>
+<td><code>OwnerId</code></td>
+<td>Map to Salesforce User ID via lookup table</td>
+<td>Must exist in SFDC</td>
+</tr>
+<tr>
+<td>Product interest keywords</td>
+<td><code>Product_Interest__c</code></td>
+<td>Match against product catalog</td>
+<td>Predefined picklist values</td>
+</tr>
+<tr>
+<td>Urgency indicators</td>
+<td><code>Rating</code></td>
+<td>"Hot" if contains "urgent", "ASAP", "immediate"</td>
+<td>Default: "Warm"</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Example Transformation:</strong></p>
+<pre><code>Slack Input: &quot;lead: TechStart Inc - Sarah Chen - sarah@techstart.io - Needs demo of Premium tier ASAP&quot;
+
+Output Salesforce Fields:
+- Company: &quot;TechStart Inc&quot;
+- FirstName: &quot;Sarah&quot;
+- LastName: &quot;Chen&quot;
+- Email: &quot;sarah@techstart.io&quot;
+- Description: &quot;Needs demo of Premium tier ASAP&quot;
+- LeadSource: &quot;Slack&quot;
+- Rating: &quot;Hot&quot;
+- Product_Interest__c: &quot;Premium&quot;
+- Status: &quot;New&quot;
+</code></pre>
+<h3>API Rate Limit Management</h3>
+<ul>
+<li>Salesforce: 15,000 API calls per 24 hours (shared limit)</li>
+<li>Slack: 1,000 events per minute (Tier 3 workspace)</li>
+<li>[CALC] Maximum sustainable throughput:</li>
+<li>Peak: 100 leads/hour × 3 API calls/lead = 300 calls/hour</li>
+<li>Daily: 8 hours × 100 leads/hour = 800 leads/day × 3 = 2,400 calls/day</li>
+<li>Safety buffer: 15,000 / 2,400 = 6.25× headroom available</li>
+</ul>
+<h2>4. Error Handling Mechanism</h2>
+<h3>Three-Tier Retry Strategy</h3>
+<p><strong>Tier 1: Immediate Retry (Transient Errors)</strong>
+- Errors: Network timeouts, temporary Salesforce unavailability
+- Retry count: 2 immediate retries
+- Delay: Exponential backoff starting at 2 seconds
+- [CALC] Total wait time: 2s + 4s = 6s maximum</p>
+<p><strong>Tier 2: Delayed Retry (Data Errors)</strong>
+- Errors: Validation failures, duplicate detection, field length issues
+- Retry count: 3 retries with data correction
+- Delay: 5 minutes between attempts
+- Action: Attempt automatic correction (trim fields, format normalization)
+- [CALC] Total processing window: 3 × 5min = 15min + processing time</p>
+<p><strong>Tier 3: Manual Intervention (Permanent Errors)</strong>
+- Errors: Invalid credentials, schema changes, permission errors
+- Action: Move to Dead Letter Queue (DLQ)
+- Alert: Immediate notification to DevOps team via PagerDuty
+- Escalation: After 15 minutes, notify Sales Operations manager</p>
+<h3>Monitoring &amp; Alerting Matrix</h3>
+<table>
+<thead>
+<tr>
+<th>Error Type</th>
+<th>Detection Method</th>
+<th>Alert Threshold</th>
+<th>Notification Channel</th>
+<th>Escalation Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>API Authentication</td>
+<td>OAuth token refresh failure</td>
+<td>1 consecutive failure</td>
+<td>Slack #system-alerts</td>
+<td>DevOps → CTO after 30min</td>
+</tr>
+<tr>
+<td>Data Validation</td>
+<td>&gt;20% rejection rate</td>
+<td>5-minute rolling window</td>
+<td>Email + Slack DM</td>
+<td>Sales Ops immediate</td>
+</tr>
+<tr>
+<td>Throughput Degradation</td>
+<td>&lt;50% of expected volume</td>
+<td>1-hour period</td>
+<td>CloudWatch Alarm</td>
+<td>Engineering team</td>
+</tr>
+<tr>
+<td>End-to-End Latency</td>
+<td>&gt;30 seconds P95</td>
+<td>15-minute average</td>
+<td>Datadog Dashboard</td>
+<td>SRE on-call</td>
+</tr>
+<tr>
+<td>Message Loss</td>
+<td>DLQ size &gt; 10</td>
+<td>Any time</td>
+<td>PagerDuty</td>
+<td>Immediate page</td>
+</tr>
+</tbody>
+</table>
+<h3>Recovery Procedures</h3>
+<ol>
+<li><strong>Partial Outage (Salesforce)</strong>: Queue messages in SQS (7-day retention), resume when available</li>
+<li><strong>Partial Outage (Slack)</strong>: Enable polling mode, check last 24 hours of messages</li>
+<li><strong>Complete Outage</strong>: Manual CSV import via Salesforce Data Loader with audit trail</li>
+</ol>
+<h2>5. Security &amp; Compliance Notes</h2>
+<h3>Data Protection Measures</h3>
+<p><strong>In Transit:</strong>
+- TLS 1.2+ for all API communications
+- Slack signing secret verification for all inbound requests
+- OAuth 2.0 with JWT tokens for Salesforce authentication
+- IP whitelisting for middleware endpoints</p>
+<p><strong>At Rest:</strong>
+- Secrets stored in AWS Secrets Manager (automatic rotation every 90 days)
+- Message payloads encrypted using AWS KMS (AES-256)
+- Audit logs immutable in DynamoDB with 7-year retention
+- PII masking in logs (email domains only, no full addresses)</p>
+<h3>Compliance Alignment</h3>
+<table>
+<thead>
+<tr>
+<th>Regulation</th>
+<th>Requirement</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GDPR</td>
+<td>Right to erasure</td>
+<td>Salesforce field <code>IsDeleted</code> flag, not physical deletion</td>
+</tr>
+<tr>
+<td>CCPA</td>
+<td>Data access requests</td>
+<td>Export capability via Salesforce reporting</td>
+</tr>
+<tr>
+<td>SOC 2</td>
+<td>Audit trail</td>
+<td>Complete transaction logging with user context</td>
+</tr>
+<tr>
+<td>HIPAA (if applicable)</td>
+<td>PHI protection</td>
+<td>No medical information in Slack messages policy</td>
+</tr>
+<tr>
+<td>Internal Policy</td>
+<td>Sales data classification</td>
+<td>All leads classified as "Confidential - Internal"</td>
+</tr>
+</tbody>
+</table>
+<h3>Access Control Matrix</h3>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Slack Access</th>
+<th>Salesforce Access</th>
+<th>Middleware Access</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sales Representative</td>
+<td>Read/Write #sales-leads</td>
+<td>Read/Write own leads</td>
+<td>None</td>
+</tr>
+<tr>
+<td>Sales Manager</td>
+<td>Read all channels</td>
+<td>Read team leads, Write all</td>
+<td>Read-only metrics</td>
+</tr>
+<tr>
+<td>Sales Operations</td>
+<td>Read/Write all channels</td>
+<td>Read/Write all leads</td>
+<td>Configuration access</td>
+</tr>
+<tr>
+<td>DevOps Engineer</td>
+<td>None</td>
+<td>None</td>
+<td>Full operational access</td>
+</tr>
+<tr>
+<td>System Account</td>
+<td>Bot token only</td>
+<td>Integration user only</td>
+<td>Execution role only</td>
+</tr>
+</tbody>
+</table>
+<h3>Assumptions Documented</h3>
+<ol>
+<li><strong>Assumption A1</strong>: Slack workspace is Enterprise Grid with compliance features enabled</li>
+<li><strong>Assumption A2</strong>: Salesforce org has API access enabled and available API licenses</li>
+<li><strong>Assumption A3</strong>: All sales team members complete data handling training annually</li>
+<li><strong>Assumption A4</strong>: No sensitive customer data (SSN, credit cards) will be shared via Slack</li>
+<li><strong>Assumption A5</strong>: Company maintains Business Associate Agreement if healthcare clients exist</li>
+</ol>
+<h2>6. Performance Metrics Baseline</h2>
+<h3>Throughput Calculations</h3>
+<p><strong>Expected Volume:</strong>
+- Current manual process: ~50 leads/day
+- Expected increase with automation: 60% more leads captured
+- [CALC] Target volume: 50 × 1.6 = 80 leads/day average
+- [CALC] Peak capacity (holiday sales): 80 × 3 = 240 leads/day
+- [CALC] Maximum sustainable: 100 leads/hour × 8 hours = 800 leads/day</p>
+<p><strong>System Capacity Design:</strong>
+- Lambda concurrency: 100 concurrent executions
+- SQS throughput: 3,000 messages/second (standard queue)
+- [CALC] Bottleneck analysis: Salesforce API (300 calls/hour) limits to 100 leads/hour
+- [CALC] Headroom: 100 / 80 = 25% capacity buffer at target volume</p>
+<h3>Latency Service Level Objectives</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Target</th>
+<th>Warning</th>
+<th>Critical</th>
+<th>Measurement Method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>End-to-end processing</td>
+<td>≤ 10 seconds P95</td>
+<td>10-20 seconds</td>
+<td>&gt; 20 seconds</td>
+<td>CloudWatch metrics</td>
+</tr>
+<tr>
+<td>Slack API response</td>
+<td>≤ 3 seconds P99</td>
+<td>3-5 seconds</td>
+<td>&gt; 5 seconds</td>
+<td>API Gateway logs</td>
+</tr>
+<tr>
+<td>Salesforce API call</td>
+<td>≤ 2 seconds P95</td>
+<td>2-4 seconds</td>
+<td>&gt; 4 seconds</td>
+<td>Lambda execution logs</td>
+</tr>
+<tr>
+<td>Queue time</td>
+<td>≤ 1 second P95</td>
+<td>1-3 seconds</td>
+<td>&gt; 3 seconds</td>
+<td>SQS CloudWatch</td>
+</tr>
+<tr>
+<td>Data validation</td>
+<td>≤ 500ms P99</td>
+<td>500ms-1s</td>
+<td>&gt; 1 second</td>
+<td>Custom metrics</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Current Baseline Measurements:</strong>
+- Manual process latency: 2-3 minutes per lead (data entry time)
+- [CALC] Improvement factor: 180 seconds / 10 seconds = 18× faster
+- [CALC] Time savings: 80 leads/day × 2.5 minutes saved = 200 minutes/day = 3.3 hours/day</p>
+<h3>Failure Rate Expectations</h3>
+<table>
+<thead>
+<tr>
+<th>Failure Type</th>
+<th>Acceptable Rate</th>
+<th>Monitoring Threshold</th>
+<th>Business Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Total system failure</td>
+<td>&lt; 0.1% (99.9% uptime)</td>
+<td>&gt; 0.5% for 5 minutes</td>
+<td>High - manual fallback</td>
+</tr>
+<tr>
+<td>Individual lead failure</td>
+<td>&lt; 2% of total volume</td>
+<td>&gt; 5% for 1 hour</td>
+<td>Medium - review required</td>
+</tr>
+<tr>
+<td>Data corruption</td>
+<td>&lt; 0.01%</td>
+<td>Any occurrence</td>
+<td>Critical - immediate fix</td>
+</tr>
+<tr>
+<td>SLA violation</td>
+<td>&lt; 1% of requests</td>
+<td>&gt; 5% for 30 minutes</td>
+<td>Medium - performance review</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Availability Calculation:</strong>
+- Component availability: Slack (99.95%), AWS (99.99%), Salesforce (99.9%)
+- [CALC] Theoretical maximum: 0.9995 × 0.9999 × 0.999 = 0.9984 = 99.84%
+- [CALC] Annual downtime allowance: (1 - 0.9984) × 365 × 24 × 60 = 84 minutes/year</p>
+<h2>7. Deployment Readiness Checklist</h2>
+<h3>Pre-Deployment Requirements</h3>
+<p><strong>Infrastructure (AWS)</strong>
+- [ ] AWS Account with appropriate permissions (Dev/Prod separation)
+- [ ] VPC configured with NAT Gateway for outbound Salesforce access
+- [ ] Lambda functions deployed with 512MB memory, 30s timeout
+- [ ] SQS queues created (main and DLQ) with 7-day retention
+- [ ] API Gateway endpoint with custom domain and WAF rules
+- [ ] CloudWatch alarms configured for all critical metrics
+- [ ] IAM roles with least-privilege permissions
+- [ ] Secrets Manager entries for Slack and Salesforce credentials
+- [ ] DynamoDB table for audit logging with TTL enabled</p>
+<p><strong>Slack Configuration</strong>
+- [ ] Slack App created in workspace with appropriate scopes:
+  - <code>channels:history</code> (read channel messages)
+  - <code>channels:read</code> (get channel info)
+  - <code>groups:read</code> (read user groups)
+  - <code>users:read</code> (get user info)
+- [ ] Event subscription enabled for <code>message.channels</code>
+- [ ] Request URL verified with Slack (API Gateway endpoint)
+- [ ] Bot user added to <code>#sales-leads</code> channel
+- [ ] User group mappings configured (sales-team → Salesforce owners)
+- [ ] Testing with restricted channel completed</p>
+<p><strong>Salesforce Configuration</strong>
+- [ ] Connected App created with OAuth settings:
+  - API Enabled permission
+  - JWT Bearer Flow enabled
+  - IP restrictions applied
+- [ ] Integration user created with profile:
+  - "Marketing User" checkbox enabled
+  - "API Enabled" permission
+  - Lead object permissions (CRUD)
+  - Custom field access
+- [ ] Lead assignment rules reviewed (avoid conflict with automation)
+- [ ] Validation rules updated to allow Slack-originated leads
+- [ ] Duplicate rules configured to prevent true duplicates
+- [ ] Required fields confirmed (Company, LastName minimum)
+- [ ] Web-to-Lead disabled for overlapping capture</p>
+<p><strong>Data Mapping Validation</strong>
+- [ ] Test suite executed with 50 sample messages
+- [ ] Field mapping confirmed for 100% of test cases
+- [ ] Edge cases tested:
+  - International characters in company names
+  - Multiple email addresses in message
+  - Missing required fields
+  - Extremely long messages (&gt;1000 chars)
+- [ ] Salesforce record inspection shows correct field population
+- [ ] Owner assignment logic verified against user mapping table</p>
+<h3>Go-Live Sequence</h3>
+<p><strong>Phase 1: Dry Run (Week 1)</strong>
+1. Deploy to staging environment (identical to production)
+2. Configure Slack event to staging endpoint
+3. Process 20 real leads with <code>IsTest__c = true</code> flag in Salesforce
+4. Validate all data flows without affecting production CRM
+5. Sales team review of sample output</p>
+<p><strong>Phase 2: Shadow Mode (Week 2)</strong>
+1. Deploy to production infrastructure
+2. Process all leads but mark as <code>Status = "Shadow Test"</code>
+3. Manual entry continues in parallel
+4. Compare automated vs manual records (100% match required)
+5. Performance metrics collection and tuning</p>
+<p><strong>Phase 3: Gradual Cutover (Week 3)</strong>
+1. Enable lead creation for 25% of sales team (early adopters)
+2. Monitor for 48 hours, address any issues
+3. Expand to 50% of team
+4. Full rollout to 100% after successful validation
+5. Disable manual entry process</p>
+<p><strong>Phase 4: Post-Deployment (Week 4+)</strong>
+1. Daily review of failure logs for first 14 days
+2. Weekly performance report to stakeholders
+3. Monthly optimization based on usage patterns
+4. Quarterly security review and credential rotation</p>
+<h3>Rollback Plan</h3>
+<ol>
+<li><strong>Level 1 (Minor Issues)</strong>: Disable Slack event subscription, manual processing resumes</li>
+<li><strong>Level 2 (Data Issues)</strong>: Deploy previous Lambda version, maintain queue processing</li>
+<li><strong>Level 3 (System Issues)</strong>: Redirect API Gateway</li>
+</ol>
+  </article>
+</body>
+</html>
